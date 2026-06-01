@@ -97,7 +97,7 @@
                             colspan="2"
                             widget="many2many"
                             domain="[('reconciled', '=', False),
-                                        ('debit', '>', 0),
+                                        ('balance', '!=', 0),
                                         ('check_deposit_id', '=', False),
                                         ('currency_id', '=', currency_id),
                                 ('account_id', '=', in_hand_check_account_id),
