@@ -109,7 +109,7 @@ class AccountCheckDeposit(models.Model):
     @api.depends(
         "company_id",
         "currency_id",
-        "check_payment_ids.debit",
+        "check_payment_ids.balance",
         "check_payment_ids.amount_currency",
         "move_id.line_ids.reconciled",
     )
@@ -117,15 +117,15 @@ class AccountCheckDeposit(models.Model):
         rg_res = self.env["account.move.line"]._read_group(
             [("check_deposit_id", "in", self.ids)],
             groupby=["check_deposit_id"],
-            aggregates=["amount_currency:sum", "debit:sum", "id:count"],
+            aggregates=["amount_currency:sum", "balance:sum", "id:count"],
         )
         mapped_data = {
             deposit.id: {
-                "debit": total_debit,
+                "balance": total_balance,
                 "amount_currency": total_amount_currency,
                 "count": line_count,
             }
-            for (deposit, total_amount_currency, total_debit, line_count) in rg_res
+            for (deposit, total_amount_currency, total_balance, line_count) in rg_res
         }
 
         for deposit in self:
@@ -134,7 +134,7 @@ class AccountCheckDeposit(models.Model):
                     "amount_currency"
                 ]
             else:
-                total = mapped_data.get(deposit.id, {"debit": 0.0})["debit"]
+                total = mapped_data.get(deposit.id, {"balance": 0.0})["balance"]
             count = mapped_data.get(deposit.id, {"count": 0})["count"]
             deposit.total_amount = deposit.currency_id.round(total)
             deposit.check_count = count
@@ -179,7 +179,7 @@ class AccountCheckDeposit(models.Model):
                             "The check with amount %(amount)s and reference '%(ref)s' "
                             "is in currency %(check_currency)s but the deposit is in "
                             "currency %(deposit_currency)s.",
-                            amount=line.debit,
+                            amount=abs(line.balance),
                             ref=line.ref or "",
                             check_currency=line.currency_id.name,
                             deposit_currency=deposit_currency.name,
@@ -233,13 +233,13 @@ class AccountCheckDeposit(models.Model):
 
     def _prepare_move_vals(self):
         self.ensure_one()
-        total_debit = 0.0
+        total_balance = 0.0
         total_amount_currency = 0.0
         for line in self.check_payment_ids:
-            total_debit += line.debit
+            total_balance += line.balance
             total_amount_currency += line.amount_currency
 
-        total_debit = self.company_id.currency_id.round(total_debit)
+        total_balance = self.company_id.currency_id.round(total_balance)
         total_amount_currency = self.currency_id.round(total_amount_currency)
 
         counterpart_account = False
@@ -263,30 +263,33 @@ class AccountCheckDeposit(models.Model):
                 % self.company_id.display_name
             )
 
+        in_hand_line = {
+            "account_id": self.in_hand_check_account_id.id,
+            "partner_id": False,
+            "currency_id": self.currency_id.id,
+            "amount_currency": total_amount_currency * -1,
+        }
+        counterpart_line = {
+            "account_id": counterpart_account.id,
+            "partner_id": False,
+            "currency_id": self.currency_id.id,
+            "amount_currency": total_amount_currency,
+        }
+        if total_balance > 0:
+            in_hand_line["credit"] = total_balance
+            counterpart_line["debit"] = total_balance
+        elif total_balance < 0:
+            in_hand_line["debit"] = abs(total_balance)
+            counterpart_line["credit"] = abs(total_balance)
+
         vals = {
             "journal_id": self.journal_id.id,
             "date": self.deposit_date,
             "ref": _("Check Deposit %s") % self.name,
             "company_id": self.company_id.id,
             "line_ids": [
-                Command.create(
-                    {
-                        "account_id": self.in_hand_check_account_id.id,
-                        "partner_id": False,
-                        "credit": total_debit,
-                        "currency_id": self.currency_id.id,
-                        "amount_currency": total_amount_currency * -1,
-                    }
-                ),
-                Command.create(
-                    {
-                        "account_id": counterpart_account.id,
-                        "partner_id": False,
-                        "debit": total_debit,
-                        "currency_id": self.currency_id.id,
-                        "amount_currency": total_amount_currency,
-                    }
-                ),
+                Command.create(in_hand_line),
+                Command.create(counterpart_line),
             ],
         }
         return vals
@@ -319,7 +322,7 @@ class AccountCheckDeposit(models.Model):
                 ("company_id", "=", self.company_id.id),
                 ("reconciled", "=", False),
                 ("account_id", "=", self.in_hand_check_account_id.id),
-                ("debit", ">", 0),
+                ("balance", "!=", 0),
                 ("check_deposit_id", "=", False),
                 ("currency_id", "=", self.currency_id.id),
                 ("parent_state", "=", "posted"),
